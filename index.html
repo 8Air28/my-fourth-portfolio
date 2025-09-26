@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>距離計測ツール（スマホ最適化版）</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css"
+    />
+
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+      }
+      #map {
+        height: 100vh;
+        width: 100%;
+      }
+
+      #controls {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 10px;
+        z-index: 1000;
+        border-radius: 8px;
+        max-height: 90vh;
+        overflow-y: auto;
+        font-size: 14px;
+        width: 90%;
+        max-width: 300px;
+        display: none;
+        box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
+      }
+
+      #toggleControls {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 10px;
+        z-index: 1001;
+        border-radius: 50%;
+        font-size: 20px;
+        cursor: pointer;
+        box-shadow: 0px 2px 6px rgba(0, 0, 0, 0.3);
+      }
+
+      label {
+        display: block;
+        margin-bottom: 5px;
+      }
+      .line-entry {
+        margin-bottom: 5px;
+        font-size: 14px;
+      }
+      .line-entry button {
+        margin-left: 5px;
+        font-size: 12px;
+        padding: 4px;
+      }
+      #pdfBtn,
+      #undoBtn,
+      #locateBtn {
+        width: 100%;
+        margin-top: 5px;
+        padding: 10px;
+        font-size: 14px;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 6px;
+        margin-bottom: 5px;
+        font-size: 14px;
+      }
+
+      #geocoder {
+        margin-top: 10px;
+      }
+
+      @media (max-width: 600px) {
+        #controls {
+          width: 95%;
+          font-size: 13px;
+          padding: 8px;
+        }
+        #toggleControls {
+          font-size: 18px;
+          padding: 8px;
+        }
+        .line-entry {
+          font-size: 13px;
+        }
+        input,
+        select {
+          font-size: 13px;
+          padding: 5px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="toggleControls">⚙️</div>
+
+    <div id="controls">
+      <div id="distance" style="font-weight: bold; font-size: 16px">
+        距離: 0 m
+      </div>
+      <label
+        >単位:
+        <select id="unitSelect">
+          <option value="m">メートル (m)</option>
+          <option value="km">キロメートル (km)</option>
+        </select>
+      </label>
+      <label
+        >線の色:
+        <input type="color" id="lineColor" value="#ff0000" />
+      </label>
+      <label
+        >線の太さ:
+        <input type="number" id="lineWeight" min="1" max="10" value="3" />
+      </label>
+      <label
+        >線の名前:
+        <input type="text" id="lineName" placeholder="例: 散歩コース" />
+      </label>
+      <button id="locateBtn">📍 現在地へ移動</button>
+      <button id="undoBtn">↩️ 一個戻る</button>
+      <button id="pdfBtn">📄 PDF保存</button>
+      <div id="geocoder"></div>
+      <h4>線一覧</h4>
+      <div id="lineList"></div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <script>
+      const { jsPDF } = window.jspdf;
+
+      const map = L.map("map").setView([35.681236, 139.767125], 14);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
+      }).addTo(map);
+
+      const distanceDisplay = document.getElementById("distance");
+      const unitSelect = document.getElementById("unitSelect");
+      const lineColorInput = document.getElementById("lineColor");
+      const lineWeightInput = document.getElementById("lineWeight");
+      const lineNameInput = document.getElementById("lineName");
+      const locateBtn = document.getElementById("locateBtn");
+      const undoBtn = document.getElementById("undoBtn");
+      const pdfBtn = document.getElementById("pdfBtn");
+      const lineList = document.getElementById("lineList");
+      const controls = document.getElementById("controls");
+      const toggleControls = document.getElementById("toggleControls");
+
+      let lineOptions = {
+        color: lineColorInput.value,
+        weight: Number(lineWeightInput.value),
+      };
+      const drawnItems = new L.FeatureGroup();
+      map.addLayer(drawnItems);
+
+      const drawControl = new L.Control.Draw({
+        edit: { featureGroup: drawnItems },
+        draw: {
+          polyline: true,
+          polygon: false,
+          circle: false,
+          rectangle: false,
+          marker: false,
+          circlemarker: false,
+        },
+      });
+      map.addControl(drawControl);
+
+      let currentLineLayer = null;
+      let lineCounter = 0;
+      const linesData = {};
+
+      function calculateDistance(latlngs) {
+        let total = 0;
+        for (let i = 0; i < latlngs.length - 1; i++) {
+          total += latlngs[i].distanceTo(latlngs[i + 1]);
+        }
+        return total;
+      }
+
+      function formatDistance(dist) {
+        return unitSelect.value === "km"
+          ? (dist / 1000).toFixed(3) + " km"
+          : dist.toFixed(2) + " m";
+      }
+
+      function updateDistanceDisplay(lineId) {
+        const dist = linesData[lineId].distance;
+        distanceDisplay.textContent = `距離: ${formatDistance(dist)}`;
+      }
+
+      function saveLines() {
+        const saveData = {};
+        Object.keys(linesData).forEach((id) => {
+          saveData[id] = {
+            latlngs: linesData[id].layer.getLatLngs(),
+            distance: linesData[id].distance,
+            color: linesData[id].color,
+            weight: linesData[id].weight,
+            name: linesData[id].name,
+          };
+        });
+        localStorage.setItem("linesData", JSON.stringify(saveData));
+      }
+
+      function loadLines() {
+        const saved = localStorage.getItem("linesData");
+        if (!saved) return;
+        const savedLines = JSON.parse(saved);
+        Object.keys(savedLines).forEach((id) => {
+          const data = savedLines[id];
+          const layer = L.polyline(data.latlngs, {
+            color: data.color,
+            weight: data.weight,
+          }).addTo(drawnItems);
+          linesData[id] = {
+            layer: layer,
+            distance: data.distance,
+            color: data.color,
+            weight: data.weight,
+            name: data.name,
+          };
+          addLineToList(id, data.distance, data.name);
+        });
+      }
+
+      function addLineToList(lineId, dist, name) {
+        const div = document.createElement("div");
+        div.className = "line-entry";
+        div.id = `line-entry-${lineId}`;
+        div.innerHTML = `${name || "線" + lineId}: ${formatDistance(dist)} 
+    <button onclick="removeLine(${lineId})">削除</button> 
+    <button onclick="showLine(${lineId})">表示</button>`;
+        lineList.appendChild(div);
+      }
+
+      window.removeLine = function (lineId) {
+        drawnItems.removeLayer(linesData[lineId].layer);
+        document.getElementById(`line-entry-${lineId}`).remove();
+        delete linesData[lineId];
+        distanceDisplay.textContent = "距離: 0 m";
+        saveLines();
+      };
+
+      window.showLine = function (lineId) {
+        const latlngs = linesData[lineId].layer.getLatLngs();
+        map.fitBounds(latlngs);
+        updateDistanceDisplay(lineId);
+      };
+
+      map.on(L.Draw.Event.CREATED, function (event) {
+        const layer = event.layer;
+        layer.setStyle(lineOptions);
+        drawnItems.addLayer(layer);
+
+        const latlngs = layer.getLatLngs();
+        const dist = calculateDistance(latlngs);
+
+        lineCounter++;
+        const lineId = lineCounter;
+        const lineName = lineNameInput.value || "線" + lineId;
+
+        linesData[lineId] = {
+          layer: layer,
+          distance: dist,
+          color: lineOptions.color,
+          weight: lineOptions.weight,
+          name: lineName,
+        };
+        addLineToList(lineId, dist, lineName);
+        updateDistanceDisplay(lineId);
+        saveLines();
+
+        currentLineLayer = layer;
+      });
+
+      undoBtn.addEventListener("click", () => {
+        if (!currentLineLayer) return;
+        const latlngs = currentLineLayer.getLatLngs();
+        if (latlngs.length > 1) {
+          latlngs.pop();
+          currentLineLayer.setLatLngs(latlngs);
+          updateDistanceDisplay(lineCounter);
+        }
+      });
+
+      unitSelect.addEventListener("change", () => {
+        Object.keys(linesData).forEach((lineId) => {
+          const dist = linesData[lineId].distance;
+          document.getElementById(`line-entry-${lineId}`).innerHTML = `${
+            linesData[lineId].name
+          }: ${formatDistance(dist)} 
+      <button onclick="removeLine(${lineId})">削除</button> 
+      <button onclick="showLine(${lineId})">表示</button>`;
+        });
+      });
+
+      lineColorInput.addEventListener("change", () => {
+        lineOptions.color = lineColorInput.value;
+      });
+
+      lineWeightInput.addEventListener("change", () => {
+        lineOptions.weight = Number(lineWeightInput.value);
+      });
+
+      locateBtn.addEventListener("click", () => {
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const latlng = [pos.coords.latitude, pos.coords.longitude];
+              map.setView(latlng, 16);
+            },
+            () => alert("現在地を取得できませんでした")
+          );
+        } else {
+          alert("このブラウザは現在地取得に対応していません");
+        }
+      });
+
+      toggleControls.addEventListener("click", () => {
+        controls.style.display =
+          controls.style.display === "block" ? "none" : "block";
+      });
+
+      pdfBtn.addEventListener("click", () => {
+        const doc = new jsPDF();
+        doc.setFontSize(16);
+        doc.text("線の距離一覧", 10, 10);
+
+        let y = 20;
+        Object.keys(linesData).forEach((lineId) => {
+          const line = linesData[lineId];
+          doc.setFontSize(12);
+          doc.text(`${line.name}: ${formatDistance(line.distance)}`, 10, y);
+          y += 10;
+        });
+
+        doc.save("線距離一覧.pdf");
+      });
+
+      // 検索バー追加
+      L.Control.geocoder({ placeholder: "場所を検索..." }).addTo(map);
+
+      loadLines();
+    </script>
+  </body>
+</html>
